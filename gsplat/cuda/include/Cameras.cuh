@@ -1,5 +1,5 @@
 /*
- * SPDX-FileCopyrightText: Copyright 2025-2026 the Regents of the University of California, Nerfstudio Team and contributors. All rights reserved.
+ * SPDX-FileCopyrightText: Copyright 2025 the Regents of the University of California, Nerfstudio Team and contributors. All rights reserved.
  * SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  * SPDX-License-Identifier: Apache-2.0
  *
@@ -296,6 +296,19 @@ struct ShutterPose {
     }
 };
 
+// When precise quaternion normalization is needed, CUDA <= 12.8 does not keep
+// enough precision under -use_fast_math and needs the explicit operation below.
+inline __device__ auto precise_normalize(glm::fquat const &q) -> glm::fquat {
+#if defined(__CUDACC_VER_MAJOR__) && \
+    ((__CUDACC_VER_MAJOR__ < 12) || \
+     (__CUDACC_VER_MAJOR__ == 12 && __CUDACC_VER_MINOR__ <= 8))
+    auto const inv_norm = __frsqrt_rn(glm::dot(q, q));
+    return q * inv_norm;
+#else
+    return glm::normalize(q);
+#endif
+}
+
 inline __device__ auto interpolate_shutter_pose(
     float relative_frame_time,
     RollingShutterParameters const &rolling_shutter_parameters
@@ -368,6 +381,25 @@ template <class DerivedCameraModel> struct BaseCameraModel {
         }
         
         return cam_ray;
+    }
+
+    // Convert pixel indices (column j, row i) to image-point coordinates.
+    // For pixel-based cameras, returns pixel centers (j+0.5, i+0.5).
+    // Lidar overrides this to return scaled-angle coordinates.
+    inline __device__ glm::fvec2 element_to_image_point(int j, int i) const
+    {
+        return {(float)j + 0.5f, (float)i + 0.5f};
+    }
+
+    // Generate a world ray for pixel (j, i) using rolling shutter parameters.
+    // Chains element_to_image_point → image_point_to_world_ray_shutter_pose.
+    inline __device__ WorldRay element_to_world_ray_shutter_pose(
+        int j, int i,
+        const RollingShutterParameters &rs_params) const
+    {
+        auto derived = static_cast<DerivedCameraModel const *>(this);
+        const auto img_pt = derived->element_to_image_point(j, i);
+        return derived->image_point_to_world_ray_shutter_pose(img_pt, rs_params);
     }
 
     // Function to compute the relative frame time for a given image point based
@@ -483,7 +515,11 @@ template <class DerivedCameraModel> struct BaseCameraModel {
 
             t_rs = (1.f - relative_frame_time) * t_start +
                    relative_frame_time * t_end;
-            q_rs = glm::normalize(glm::slerp(q_start, q_end, relative_frame_time));
+            // The rolling-shutter optimization loop is sensitive to small pose
+            // updates, so use the precise normalization here.
+            q_rs = precise_normalize(
+                glm::slerp(q_start, q_end, relative_frame_time)
+            );
 
             auto const [image_point_rs, valid_rs] =
                 derived->camera_ray_to_image_point(
@@ -614,7 +650,13 @@ struct OpenCVPinholeCameraModel
             1.f + r2 * (parameters.radial_coeffs[3] +
                         r2 * (parameters.radial_coeffs[4] +
                               r2 * parameters.radial_coeffs[5]));
-        auto const icD = icD_numerator / icD_denominator;
+        // Guard against the rational distortion model having a pole (denominator
+        // = 0) at this r².  Setting icD = 0 makes the downstream validity check
+        // (icD > 0.8) reject this point, which is the correct behavior — the
+        // camera model cannot reliably project at this radius.
+        auto const icD = (std::fabs(icD_denominator) > 1e-8f)
+            ? icD_numerator / icD_denominator
+            : 0.f;
 
         auto const delta_x = parameters.tangential_coeffs[0] * a1 +
                              parameters.tangential_coeffs[1] * a2 +
@@ -1234,7 +1276,14 @@ public:
         // undoing linear term A = [c,d;e;1] via A^-1 = [1,-d;-e,c] / (c-e*d)
         auto const& [c, d, e] = parameters.dist.linear_cde;
         image_point -= glm::fvec2{parameters.principal_point[0], parameters.principal_point[1]};
-        auto const uv = glm::fvec2{image_point.x - d * image_point.y, -e * image_point.x + c * image_point.y} / (c - e * d);
+        // The CDE linear matrix [[c,d],[e,1]] must be invertible for
+        // unprojection.  A singular matrix (det = c - e*d ≈ 0) means the
+        // calibration is degenerate — return an invalid ray.
+        auto const cde_det = c - e * d;
+        if (std::fabs(cde_det) < 1e-8f) {
+            return {glm::fvec3{0.f, 0.f, 1.f}, false};
+        }
+        auto const uv = glm::fvec2{image_point.x - d * image_point.y, -e * image_point.x + c * image_point.y} / cde_det;
 
         // Compute the radial distance from the principal point
         auto const delta = length(uv);

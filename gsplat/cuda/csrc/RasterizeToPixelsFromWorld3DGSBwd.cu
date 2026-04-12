@@ -1,5 +1,5 @@
 /*
- * SPDX-FileCopyrightText: Copyright 2025-2026 the Regents of the University of California, Nerfstudio Team and contributors. All rights reserved.
+ * SPDX-FileCopyrightText: Copyright 2025 the Regents of the University of California, Nerfstudio Team and contributors. All rights reserved.
  * SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  * SPDX-License-Identifier: Apache-2.0
  *
@@ -111,8 +111,8 @@ __global__ void rasterize_to_pixels_from_world_3dgs_bwd_kernel(
         const int tile_element_id = block.thread_rank();
         if(tile_element_id < element_count)
         {
-            j = lidar_device_coeffs->tiles_to_elements_map[element_start + tile_element_id].x; // row_elevation
-            i = lidar_device_coeffs->tiles_to_elements_map[element_start + tile_element_id].y; // col_azimuth
+            j = lidar_device_coeffs->tiles_to_elements_map[element_start + tile_element_id].x; // col_azimuth
+            i = lidar_device_coeffs->tiles_to_elements_map[element_start + tile_element_id].y; // row_elevation
             assert(0 <= i);
             assert(i < image_height);
             assert(0 <= j);
@@ -158,8 +158,6 @@ __global__ void rasterize_to_pixels_from_world_3dgs_bwd_kernel(
         return;
     }
 
-    const float px = (float)j + 0.5f;
-    const float py = (float)i + 0.5f;
     // clamp this value to the last pixel
     const int32_t pix_id =
         min(i * image_width + j, image_width * image_height - 1);
@@ -171,13 +169,15 @@ __global__ void rasterize_to_pixels_from_world_3dgs_bwd_kernel(
     );
 
     WorldRay ray;
-    if(rays == nullptr)
+    if(inside && rays == nullptr)
     {
         // shift pointers to the current camera. note that glm is colume-major.
         const vec2 focal_length = {Ks[iid * 9 + 0], Ks[iid * 9 + 4]};
         const vec2 principal_point = {Ks[iid * 9 + 2], Ks[iid * 9 + 5]};
-        
-        // Create ray from pixel
+
+        // Create ray from pixel.
+        // Each camera model's element_to_image_point converts (j, i) pixel
+        // indices to the image-point convention it expects.
         if (camera_model_type == CameraModelType::PINHOLE) {
             if (radial_coeffs == nullptr && tangential_coeffs == nullptr && thin_prism_coeffs == nullptr) {
                 PerfectPinholeCameraModel::Parameters cm_params = {};
@@ -185,11 +185,11 @@ __global__ void rasterize_to_pixels_from_world_3dgs_bwd_kernel(
                 cm_params.shutter_type = rs_type;
                 cm_params.principal_point = { principal_point.x, principal_point.y };
                 cm_params.focal_length = { focal_length.x, focal_length.y };
-                cm_params.external_distortion_params = external_distortion_device_params.has_value() ? 
+                cm_params.external_distortion_params = external_distortion_device_params.has_value() ?
                     &external_distortion_device_params.value() : nullptr;
-                PerfectPinholeCameraModel camera_model(cm_params);
-                ray = camera_model.image_point_to_world_ray_shutter_pose(vec2(px, py), rs_params);
-            } else {
+                ray = PerfectPinholeCameraModel(cm_params).element_to_world_ray_shutter_pose(j, i, rs_params);
+            }
+            else {
                 OpenCVPinholeCameraModel<>::Parameters cm_params = {};
                 cm_params.resolution = {image_width, image_height};
                 cm_params.shutter_type = rs_type;
@@ -204,12 +204,12 @@ __global__ void rasterize_to_pixels_from_world_3dgs_bwd_kernel(
                 if (thin_prism_coeffs != nullptr) {
                     cm_params.thin_prism_coeffs = make_array<float, 4>(thin_prism_coeffs + iid * 4);
                 }
-                cm_params.external_distortion_params = external_distortion_device_params.has_value() ? 
+                cm_params.external_distortion_params = external_distortion_device_params.has_value() ?
                     &external_distortion_device_params.value() : nullptr;
-                OpenCVPinholeCameraModel camera_model(cm_params);
-                ray = camera_model.image_point_to_world_ray_shutter_pose(vec2(px, py), rs_params);
+                ray = OpenCVPinholeCameraModel(cm_params).element_to_world_ray_shutter_pose(j, i, rs_params);
             }
-        } else if (camera_model_type == CameraModelType::FISHEYE) {
+        }
+        else if (camera_model_type == CameraModelType::FISHEYE) {
             OpenCVFisheyeCameraModel<>::Parameters cm_params = {};
             cm_params.resolution = {image_width, image_height};
             cm_params.shutter_type = rs_type;
@@ -218,11 +218,11 @@ __global__ void rasterize_to_pixels_from_world_3dgs_bwd_kernel(
             if (radial_coeffs != nullptr) {
                 cm_params.radial_coeffs = make_array<float, 4>(radial_coeffs + iid * 4);
             }
-            cm_params.external_distortion_params = external_distortion_device_params.has_value() ? 
+            cm_params.external_distortion_params = external_distortion_device_params.has_value() ?
                 &external_distortion_device_params.value() : nullptr;
-            OpenCVFisheyeCameraModel camera_model(cm_params);
-            ray = camera_model.image_point_to_world_ray_shutter_pose(vec2(px, py), rs_params);
-        } else if (camera_model_type == CameraModelType::FTHETA) {
+            ray = OpenCVFisheyeCameraModel(cm_params).element_to_world_ray_shutter_pose(j, i, rs_params);
+        }
+        else if (camera_model_type == CameraModelType::FTHETA) {
             FThetaCameraModel<>::Parameters cm_params = {};
             cm_params.resolution = {image_width, image_height};
             cm_params.shutter_type = rs_type;
@@ -230,24 +230,24 @@ __global__ void rasterize_to_pixels_from_world_3dgs_bwd_kernel(
             cm_params.dist = ftheta_device_coeffs;
             cm_params.external_distortion_params = external_distortion_device_params.has_value() ?
                 &external_distortion_device_params.value() : nullptr;
-            FThetaCameraModel camera_model(cm_params);
-            ray = camera_model.image_point_to_world_ray_shutter_pose(vec2(px, py), rs_params);
-        } else if (camera_model_type == CameraModelType::LIDAR) {
+            ray = FThetaCameraModel(cm_params).element_to_world_ray_shutter_pose(j, i, rs_params);
+        }
+        else if (camera_model_type == CameraModelType::LIDAR) {
             assert(lidar_device_coeffs);
-            RowOffsetStructuredSpinningLidarModel camera_model(*lidar_device_coeffs);
-            ray = camera_model.image_point_to_world_ray_shutter_pose(vec2(px, py), rs_params);
-        } else {
-            // should never reach here
+            ray = RowOffsetStructuredSpinningLidarModel(*lidar_device_coeffs).element_to_world_ray_shutter_pose(j, i, rs_params);
+        }
+        else {
             assert(false);
             return;
         }
     }
     else
     {
-        assert(rays != nullptr);
+        // rays may be nullptr for inactive threads when inside==false
         ray.valid_flag = false;
         if(inside)
         {
+            assert(rays != nullptr);
             // TODO: use at least 3x64b loads instead of 6x32b
             ray.ray_org = {rays[pix_id*6+0], rays[pix_id*6+1], rays[pix_id*6+2]};
             ray.ray_dir = {rays[pix_id*6+3], rays[pix_id*6+4], rays[pix_id*6+5]};
@@ -342,6 +342,11 @@ __global__ void rasterize_to_pixels_from_world_3dgs_bwd_kernel(
             xyz_opacity_batch[tr] = {xyz.x, xyz.y, xyz.z, opac};
             scale_batch[tr] = scales[isect_bid * N + isect_gid];
             quat_batch[tr] = quats[isect_bid * N + isect_gid];
+            // Projection kernel culls degenerate Gaussians (zero quaternion,
+            // zero scale) by setting radii = 0, preventing them from entering
+            // the intersection list. Assert the preconditions here.
+            assert(glm::dot(quat_batch[tr], quat_batch[tr]) > 0.f);
+            assert(scale_batch[tr][0] > 0.f && scale_batch[tr][1] > 0.f && scale_batch[tr][2] > 0.f);
 #pragma unroll
             for (uint32_t k = 0; k < CDIM; ++k) {
                 rgbs_batch[tr * CDIM + k] = colors[isect_id * CDIM + k];
@@ -368,13 +373,17 @@ __global__ void rasterize_to_pixels_from_world_3dgs_bwd_kernel(
             mat3 Mt;
             vec3 o_minus_mu, gro, grd, grd_n, gcrod;
             float grayDist, power;
+            // Per-pixel hit distance — stored in a register, NOT in shared memory
+            // rgbs_batch, because hit_distance depends on ray_o/ray_d (per-pixel)
+            // while rgbs_batch is per-Gaussian (shared across all pixels in the tile).
+            float local_hit_dist = 0.f;
             if (valid) {
                 const vec4 xyz_opac = xyz_opacity_batch[t];
                 opac = xyz_opac[3];
                 xyz = {xyz_opac[0], xyz_opac[1], xyz_opac[2]};
                 scale = scale_batch[t];
                 quat = quat_batch[t];
-                
+
                 R = quat_to_rotmat(quat);
                 S = mat3(
                     1.0f / scale[0],
@@ -398,17 +407,14 @@ __global__ void rasterize_to_pixels_from_world_3dgs_bwd_kernel(
 
                 vis = __expf(power);
                 alpha = min(MAX_ALPHA, opac * vis);
-                if (power > 0.f || alpha < 1.f / 255.f) {
+                if (power > 0.f || alpha < 1.f / 255.f || vis <= MAX_KERNEL_DENSITY_CUTOFF) {
                     valid = false;
                 }
 
-                // Recompute hit_distance to match forward pass when use_hit_distance=True
                 if (use_hit_distance) {
                     const float hit_t = glm::dot(grd_n, -gro);
                     const vec3 grds = scale * (grd_n * hit_t);
-                    const float hit_dist = glm::length(grds);
-                    // Replace last channel in rgbs_batch with recomputed hit_distance
-                    rgbs_batch[t * CDIM + (CDIM - 1)] = hit_dist;
+                    local_hit_dist = glm::length(grds);
                 }
             }
 
@@ -426,7 +432,7 @@ __global__ void rasterize_to_pixels_from_world_3dgs_bwd_kernel(
             vec3 normal = {0.f, 0.f, 0.f};  // pre-declare for use in v_alpha and later
             if (valid) {
                 // compute the current T for this gaussian
-                float ra = 1.0f / (1.0f - alpha);
+                float ra = 1.0f / fmaxf(MIN_ONE_MINUS_ALPHA, 1.0f - alpha);
                 T *= ra;
                 // update v_rgb for this gaussian
                 const float fac = alpha * T;
@@ -454,7 +460,13 @@ __global__ void rasterize_to_pixels_from_world_3dgs_bwd_kernel(
                 float v_alpha = 0.f;
 #pragma unroll
                 for (uint32_t k = 0; k < CDIM; ++k) {
-                    v_alpha += (rgbs_batch[t * CDIM + k] * T - buffer[k] * ra) *
+                    // For the last channel with use_hit_distance, use the per-pixel
+                    // local_hit_dist instead of per-Gaussian rgbs_batch (which is
+                    // shared memory and would race across pixels in the tile).
+                    const float rgb_k = (use_hit_distance && k == CDIM - 1)
+                        ? local_hit_dist
+                        : rgbs_batch[t * CDIM + k];
+                    v_alpha += (rgb_k * T - buffer[k] * ra) *
                                v_render_c[k];
                 }
 
@@ -555,7 +567,10 @@ __global__ void rasterize_to_pixels_from_world_3dgs_bwd_kernel(
 
 #pragma unroll
                 for (uint32_t k = 0; k < CDIM; ++k) {
-                    buffer[k] += rgbs_batch[t * CDIM + k] * fac;
+                    const float rgb_k = (use_hit_distance && k == CDIM - 1)
+                        ? local_hit_dist
+                        : rgbs_batch[t * CDIM + k];
+                    buffer[k] += rgb_k * fac;
                 }
                 
                 // Update normal buffer (for product rule in next iterations)

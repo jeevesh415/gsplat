@@ -1,5 +1,5 @@
 /*
- * SPDX-FileCopyrightText: Copyright 2023-2026 the Regents of the University of California, Nerfstudio Team and contributors. All rights reserved.
+ * SPDX-FileCopyrightText: Copyright 2025 the Regents of the University of California, Nerfstudio Team and contributors. All rights reserved.
  * SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  * SPDX-License-Identifier: Apache-2.0
  *
@@ -142,8 +142,8 @@ __global__ void projection_2dgs_packed_fwd_kernel(
 
         const vec2 temp = {sum(f * M0 * M0), sum(f * M1 * M1)};
         const vec2 half_extend = mean2d * mean2d - temp;
-        radius_x = ceil(3.33f * sqrt(max(1e-4, half_extend.x)));
-        radius_y = ceil(3.33f * sqrt(max(1e-4, half_extend.y)));
+        radius_x = ceil(GAUSSIAN_EXTEND * sqrt(max(1e-4, half_extend.x)));
+        radius_y = ceil(GAUSSIAN_EXTEND * sqrt(max(1e-4, half_extend.y)));
 
         if (radius_x <= radius_clip && radius_y <= radius_clip) {
             valid = false;

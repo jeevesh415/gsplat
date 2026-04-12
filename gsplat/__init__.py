@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright 2023-2026 the Regents of the University of California, Nerfstudio Team and contributors. All rights reserved.
+# SPDX-FileCopyrightText: Copyright 2023-2025 the Regents of the University of California, Nerfstudio Team and contributors. All rights reserved.
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
@@ -23,6 +23,7 @@ from .cuda._torch_impl_2dgs import accumulate_2dgs
 from .cuda._wrapper import (
     CameraModel,
     ExternalDistortionModelMeta,
+    ExternalDistortionModelParameters,
     RollingShutterType,
     fully_fused_projection,
     fully_fused_projection_2dgs,
@@ -43,6 +44,7 @@ from .cuda._wrapper import (
     has_3dgs,
     has_3dgut,
     has_adam,
+    has_camera_wrappers,
     has_reloc,
     RowOffsetStructuredSpinningLidarModelParameters,
     RowOffsetStructuredSpinningLidarModelParametersExt,
@@ -61,6 +63,7 @@ from .strategy import DefaultStrategy, MCMCStrategy, Strategy
 from .version import __version__
 from .cuda._lidar import (
     compute_angles_to_columns_map as compute_lidar_angles_to_columns_map,
+    LidarTiling,
     SpinningDirection,
     compute_tiling as compute_lidar_tiling,
 )
@@ -74,6 +77,7 @@ all = [
     "Strategy",
     "CameraModel",
     "ExternalDistortionModelMeta",
+    "ExternalDistortionModelParameters",
     "RasterizeMode",
     "RenderMode",
     "rasterization",
@@ -104,10 +108,12 @@ all = [
     "has_3dgs",
     "has_3dgut",
     "has_adam",
+    "has_camera_wrappers",
     "has_reloc",
     "RowOffsetStructuredSpinningLidarModelParameters",
     "RowOffsetStructuredSpinningLidarModelParametersExt",
     "compute_lidar_angles_to_columns_map",
     "compute_lidar_tiling",
+    "LidarTiling",
     "SpinningDirection",
 ]

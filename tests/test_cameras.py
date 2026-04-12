@@ -1,4 +1,3 @@
-# SPDX-FileCopyrightText: Copyright 2025-2026 the Regents of the University of California, Nerfstudio Team and contributors. All rights reserved.
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
@@ -26,6 +25,7 @@ import pytest
 import torch
 import re
 import math
+from functools import lru_cache
 from itertools import product, chain
 from types import SimpleNamespace
 from dataclasses import dataclass
@@ -37,6 +37,14 @@ from gsplat.cuda._backend import _C
 
 if _C is None:
     pytest.skip("gsplat CUDA extension not available", allow_module_level=True)
+
+from gsplat.cuda._wrapper import has_camera_wrappers
+
+if not has_camera_wrappers():
+    pytest.skip(
+        "Camera wrappers not built (need BUILD_CAMERA_WRAPPERS=1)",
+        allow_module_level=True,
+    )
 
 from gsplat._helper import expand_named_params
 from gsplat.cuda._torch_cameras import (  # PyTorch reference
@@ -168,11 +176,11 @@ def parse_camera(
     params = camera_parser(param_str, batch_dims, width, height, device)
 
     if model_type == "lidar":
-        # Wrap lidar-specific params into a RowOffsetStructuredSpinningLidarModelParametersExt object
+        lidar_params, angles_to_columns_map, tiling = params
         return {
             "camera_model": model_type,
             "lidar_coeffs": RowOffsetStructuredSpinningLidarModelParametersExt(
-                **params
+                lidar_params, angles_to_columns_map, tiling
             ),
         }
     else:
@@ -392,8 +400,33 @@ def parse_ftheta_camera(
 # ==================================================
 
 
+@lru_cache(maxsize=16)
+def _cached_lidar_preprocessing(
+    lidar_params: RowOffsetStructuredSpinningLidarModelParameters,
+    n_bins_elevation: int,
+    max_pts_per_tile: int,
+    resolution_elevation: int,
+    densification_factor_azimuth: int,
+):
+    """Cache expensive lidar preprocessing across test fixtures."""
+    angles_to_columns_map = compute_lidar_angles_to_columns_map(lidar_params)
+    tiling = compute_lidar_tiling(
+        lidar_params,
+        n_bins_elevation=n_bins_elevation,
+        max_pts_per_tile=max_pts_per_tile,
+        resolution_elevation=resolution_elevation,
+        densification_factor_azimuth=densification_factor_azimuth,
+    )
+    return angles_to_columns_map, tiling
+
+
 def parse_lidar_camera(
-    param_str: str, batch_dims: tuple, width: int, height: int, device: torch.device
+    param_str: str,
+    batch_dims: tuple,
+    width: int,
+    height: int,
+    device: torch.device,
+    seed: int | None = None,
 ):
     """Parse parameters for lidar camera model."""
 
@@ -428,6 +461,14 @@ def parse_lidar_camera(
 
     elevation_span = abs(elevation_end - elevation_start)
     azimuth_base_span = abs(azimuth_base_end - azimuth_base_start)
+    # Allow tests to request deterministic lidar params without depending on
+    # whatever random draws happened earlier in the same test. This keeps the
+    # preprocessing cache reusable while preserving the old ambient-RNG behavior
+    # when seed=None.
+    generator = None
+    if seed is not None:
+        generator = torch.Generator(device=device)
+        generator.manual_seed(seed)
 
     # Generate random row elevations within FOV (sorted descending for typical lidar)
     params.row_elevations_rad = (
@@ -439,7 +480,10 @@ def parse_lidar_camera(
             device=device
             # Add small noise, but make sure it's not larger than the spacing between each row.
         )
-        + (torch.rand(n_rows, dtype=torch.float32, device=device) - 0.5)
+        + (
+            torch.rand(n_rows, dtype=torch.float32, device=device, generator=generator)
+            - 0.5
+        )
         * (elevation_span / (n_rows - 1))
         * 0.01
     )
@@ -452,20 +496,25 @@ def parse_lidar_camera(
             dtype=torch.float32,
             device=device,
         )
-        + (torch.rand(n_columns, dtype=torch.float32, device=device) - 0.5)
+        + (
+            torch.rand(
+                n_columns, dtype=torch.float32, device=device, generator=generator
+            )
+            - 0.5
+        )
         * (azimuth_base_span / (n_columns - 1))
         * 0.01
     )
 
     # Generate small random azimuth offsets per row
     params.row_azimuth_offsets_rad = (
-        torch.rand(n_rows, dtype=torch.float32, device=device) - 0.5
+        torch.rand(n_rows, dtype=torch.float32, device=device, generator=generator)
+        - 0.5
     ) * 0.2
 
     lidar_params = RowOffsetStructuredSpinningLidarModelParameters(**vars(params))
 
-    params.angles_to_columns_map = compute_lidar_angles_to_columns_map(lidar_params)
-    params.tiling = compute_lidar_tiling(
+    angles_to_columns_map, tiling = _cached_lidar_preprocessing(
         lidar_params,
         n_bins_elevation=16,
         max_pts_per_tile=16 * 16,
@@ -473,7 +522,7 @@ def parse_lidar_camera(
         densification_factor_azimuth=8,
     )
 
-    return vars(params)
+    return lidar_params, angles_to_columns_map, tiling
 
 
 @pytest.fixture
@@ -539,7 +588,7 @@ def image_points(batch_dims, image_dims, ref_camera):
             * _RowOffsetStructuredSpinningLidarModel.ANGLE_TO_PIXEL_SCALING_FACTOR
         )
 
-        points = torch.stack([row, column], dim=-1)
+        points = torch.stack([column, row], dim=-1)
     else:
         # Regular cameras use pixel coordinates
         points = torch.rand(*shape, 2) * torch.tensor([height - 1, width - 1])

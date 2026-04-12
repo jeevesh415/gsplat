@@ -1,5 +1,5 @@
 /*
- * SPDX-FileCopyrightText: Copyright 2025-2026 the Regents of the University of California, Nerfstudio Team and contributors. All rights reserved.
+ * SPDX-FileCopyrightText: Copyright 2025 the Regents of the University of California, Nerfstudio Team and contributors. All rights reserved.
  * SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  * SPDX-License-Identifier: Apache-2.0
  *
@@ -95,8 +95,8 @@ struct RowOffsetStructuredSpinningLidarModelParametersExt : public torch::Custom
     at::Tensor cdf_dense_ray_mask;
     at::Tensor tiles_pack_info;
     at::Tensor tiles_to_elements_map;
-    int cdf_resolution_elevation() const { return this->cdf_dense_ray_mask.size(-1)-1; }
-    int cdf_resolution_azimuth() const { return this->cdf_dense_ray_mask.size(-2)-1; }
+    int cdf_resolution_elevation() const { return this->cdf_dense_ray_mask.size(-2)-1; }
+    int cdf_resolution_azimuth() const { return this->cdf_dense_ray_mask.size(-1)-1; }
 };
 
 // null operator for tutorial. Does nothing.
@@ -249,7 +249,6 @@ at::Tensor spherical_harmonics_fwd(
     const at::optional<at::Tensor> &masks // [...]
 );
 std::tuple<at::Tensor, at::Tensor> spherical_harmonics_bwd(
-    int64_t K,
     int64_t degrees_to_use,
     const at::Tensor &dirs,                // [..., 3]
     const at::Tensor &coeffs,              // [..., K, 3]
@@ -275,11 +274,13 @@ void adam(
 
 // GS Tile Intersection
 std::tuple<at::Tensor, at::Tensor, at::Tensor> intersect_tile(
-    const at::Tensor &means2d,                    // [..., C, N, 2] or [nnz, 2]
-    const at::Tensor &radii,                      // [..., C, N, 2] or [nnz, 2]
-    const at::Tensor &depths,                     // [..., C, N] or [nnz]
-    const at::optional<at::Tensor> &image_ids,    // [nnz]
-    const at::optional<at::Tensor> &gaussian_ids, // [nnz]
+    const at::Tensor &means2d,                           // [..., N, 2] or [nnz, 2]
+    const at::Tensor &radii,                             // [..., N, 2] or [nnz, 2]
+    const at::Tensor &depths,                            // [..., N] or [nnz]
+    const at::optional<at::Tensor> &conics,              // [..., N, 3] or [nnz, 3] 
+    const at::optional<at::Tensor> &opacities,           // [..., N] or [nnz]        
+    const at::optional<at::Tensor> &image_ids,           // [nnz]
+    const at::optional<at::Tensor> &gaussian_ids,        // [nnz]
     int64_t I,
     int64_t tile_size,
     int64_t tile_width,

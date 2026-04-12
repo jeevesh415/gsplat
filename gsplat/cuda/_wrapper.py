@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright 2024-2026 the Regents of the University of California, Nerfstudio Team and contributors. All rights reserved.
+# SPDX-FileCopyrightText: Copyright 2024-2025 the Regents of the University of California, Nerfstudio Team and contributors. All rights reserved.
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
@@ -18,6 +18,7 @@ import math
 import warnings
 from dataclasses import dataclass
 from enum import IntEnum
+from abc import ABC
 from typing import Any, Callable, Optional, Tuple
 
 import torch
@@ -121,12 +122,21 @@ FThetaCameraDistortionParameters = _make_lazy_cuda_cls(
 )
 
 
+class ExternalDistortionModelParameters(ABC):
+    """Base class for external distortion model parameters.
+
+    All concrete external distortion models (e.g. BivariateWindshieldModelParameters)
+    should inherit from this class so that the rendering API can accept any
+    distortion model through a single type-erased parameter.
+    """
+
+
 class ExternalDistortionReferencePolynomial(IntEnum):
     FORWARD = 1
     BACKWARD = 2
 
 
-class BivariateWindshieldModelParameters:
+class BivariateWindshieldModelParameters(ExternalDistortionModelParameters):
     """Thin wrapper around the CUDA BivariateWindshieldModelParameters class.
 
     torch::Library bindings does not allow standalone constants. This
@@ -202,6 +212,7 @@ def create_camera_model(
     tangential_coeffs: Optional[Tensor] = None,
     thin_prism_coeffs: Optional[Tensor] = None,
     ftheta_coeffs: Optional[FThetaCameraDistortionParameters] = None,
+    external_distortion_coeffs: Optional[BivariateWindshieldModelParameters] = None,
     rs_type: RollingShutterType = RollingShutterType.GLOBAL,
     lidar_coeffs: Optional["RowOffsetStructuredSpinningLidarModelParametersExt"] = None,
 ):
@@ -230,6 +241,7 @@ def create_camera_model(
             tangential_coeffs,
             thin_prism_coeffs,
             ftheta_coeffs,
+            external_distortion_coeffs,
             rs_type,
         )
 
@@ -255,9 +267,9 @@ class RowOffsetStructuredSpinningLidarModelParametersExt(
             "RowOffsetStructuredSpinningLidarModelParametersExt"
         )
         return LidarParamsCUDA(
-            row_elevations_rad=self.row_elevations_rad,
-            column_azimuths_rad=self.column_azimuths_rad,
-            row_azimuth_offsets_rad=self.row_azimuth_offsets_rad,
+            row_elevations_rad=self.row_elevations_rad.contiguous(),
+            column_azimuths_rad=self.column_azimuths_rad.contiguous(),
+            row_azimuth_offsets_rad=self.row_azimuth_offsets_rad.contiguous(),
             spinning_direction=self.spinning_direction.value,
             spinning_frequency_hz=self.spinning_frequency_hz,
             fov_vert_rad=FOV.from_base(self.fov_vert_rad).to_cpp(),
@@ -266,10 +278,10 @@ class RowOffsetStructuredSpinningLidarModelParametersExt(
             angles_to_columns_map=self.angles_to_columns_map,
             n_bins_azimuth=self.tiling.n_bins_azimuth,
             n_bins_elevation=self.tiling.n_bins_elevation,
-            cdf_elevation=self.tiling.cdf_elevation,
+            cdf_elevation=self.tiling.cdf_elevation.contiguous(),
             cdf_dense_ray_mask=self.tiling.cdf_dense_ray_mask.contiguous(),
-            tiles_to_elements_map=self.tiling.tiles_to_elements_map,
-            tiles_pack_info=self.tiling.tiles_pack_info,
+            tiles_to_elements_map=self.tiling.tiles_to_elements_map.contiguous(),
+            tiles_pack_info=self.tiling.tiles_pack_info.contiguous(),
         )
 
 
@@ -633,8 +645,17 @@ def isect_tiles(
     n_images: Optional[int] = None,
     image_ids: Optional[Tensor] = None,
     gaussian_ids: Optional[Tensor] = None,
+    conics: Optional[
+        Tensor
+    ] = None,  # [..., N, 3] or [nnz, 3], enables AccuTile when provided
+    opacities: Optional[
+        Tensor
+    ] = None,  # [..., N] or [nnz], enables AccuTile when provided
 ) -> Tuple[Tensor, Tensor, Tensor]:
     """Maps projected Gaussians to intersecting tiles.
+
+    When `conics` and `opacities` are provided the kernel uses conservative ellipse intersection (AccuTile/SNUGBOX),
+    skipping tiles that the opacity-thresholded ellipse does not touch. When either is `None` the kernel falls back to the original axis-aligned bounding box.
 
     Args:
         means2d: Projected Gaussian means. [..., N, 2] if packed is False, [nnz, 2] if packed is True.
@@ -649,6 +670,8 @@ def isect_tiles(
         n_images: Number of images. Required if packed is True.
         image_ids: The image indices of the projected Gaussians. Required if packed is True.
         gaussian_ids: The column indices of the projected Gaussians. Required if packed is True.
+        conics: Inverse of projected covariances (upper triangle). [..., N, 3] if packed is False, [nnz, 3] if packed is True. Enables AccuTile when provided together with opacities.
+        opacities: Gaussian opacities. [..., N] if packed is False, [nnz] if packed is True. Enables AccuTile when provided together with conics.
 
     Returns:
         A tuple:
@@ -666,6 +689,10 @@ def isect_tiles(
         assert means2d.shape == (nnz, 2), means2d.shape
         assert radii.shape == (nnz, 2), radii.shape
         assert depths.shape == (nnz,), depths.shape
+        if conics is not None:
+            assert conics.shape == (nnz, 3), conics.shape
+        if opacities is not None:
+            assert opacities.shape == (nnz,), opacities.shape
         assert image_ids is not None, "image_ids is required if packed is True"
         assert gaussian_ids is not None, "gaussian_ids is required if packed is True"
         assert n_images is not None, "n_images is required if packed is True"
@@ -680,11 +707,17 @@ def isect_tiles(
         assert means2d.shape == image_dims + (N, 2), means2d.shape
         assert radii.shape == image_dims + (N, 2), radii.shape
         assert depths.shape == image_dims + (N,), depths.shape
+        if conics is not None:
+            assert conics.shape == image_dims + (N, 3), conics.shape
+        if opacities is not None:
+            assert opacities.shape == image_dims + (N,), opacities.shape
 
     tiles_per_gauss, isect_ids, flatten_ids = _make_lazy_cuda_func("intersect_tile")(
         means2d.contiguous(),
         radii.contiguous(),
         depths.contiguous(),
+        conics.contiguous() if conics is not None else None,
+        opacities.contiguous() if opacities is not None else None,
         image_ids,
         gaussian_ids,
         I,
@@ -1174,8 +1207,8 @@ def rasterize_to_pixels_eval3d_extra(
 
     tile_height, tile_width = isect_offsets.shape[-2:]
     if camera_model == "lidar":
-        assert tile_width == lidar_coeffs.tiling.n_bins_elevation
-        assert tile_height == lidar_coeffs.tiling.n_bins_azimuth
+        assert tile_width == lidar_coeffs.tiling.n_bins_azimuth
+        assert tile_height == lidar_coeffs.tiling.n_bins_elevation
         # TODO: improve checks. Right now we don't have access to max_pts_per_tile used,
         # hence this assert needs to be commented out.
         # assert tile_width*tile_height*lidar_coeffs.tiling.max_pts_per_tile >= lidar_coeffs.n_rows*lidar_coeffs.n_columns
@@ -2016,7 +2049,7 @@ class _RasterizeToPixelsEval3D(torch.autograd.Function):
             tangential_coeffs,
             thin_prism_coeffs,
             ftheta_coeffs,
-            lidar_coeffs,
+            lidar_coeffs,  # already converted to C++ in forward
             external_distortion_coeffs,
             isect_offsets,
             flatten_ids,
@@ -2305,17 +2338,14 @@ class _SphericalHarmonics(torch.autograd.Function):
         )
         ctx.save_for_backward(dirs, coeffs, masks)
         ctx.sh_degree = sh_degree
-        ctx.num_bases = coeffs.shape[-2]
         return colors
 
     @staticmethod
     def backward(ctx, v_colors: Tensor):
         dirs, coeffs, masks = ctx.saved_tensors
         sh_degree = ctx.sh_degree
-        num_bases = ctx.num_bases
         compute_v_dirs = ctx.needs_input_grad[1]
         v_coeffs, v_dirs = _make_lazy_cuda_func("spherical_harmonics_bwd")(
-            num_bases,
             sh_degree,
             dirs,
             coeffs,

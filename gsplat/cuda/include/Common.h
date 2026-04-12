@@ -1,5 +1,5 @@
 /*
- * SPDX-FileCopyrightText: Copyright 2023-2026 the Regents of the University of California, Nerfstudio Team and contributors. All rights reserved.
+ * SPDX-FileCopyrightText: Copyright 2025 the Regents of the University of California, Nerfstudio Team and contributors. All rights reserved.
  * SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  * SPDX-License-Identifier: Apache-2.0
  *
@@ -72,6 +72,8 @@ enum CameraModelType {
 
 #define N_THREADS_PACKED 256
 #define ALPHA_THRESHOLD (1.f / 255.f)
+// GAUSSIAN_EXTEND determines where the gaussian is truncated in standard deviations."
+#define GAUSSIAN_EXTEND 3.33f
 // MAX_ALPHA and TRANSMITTANCE_THRESHOLD are chosen so that the equivalent of
 // a maximal opacity Gaussian has to be rasterized twice to reach the threshold,
 // without getting the transmittance too small for numerical stability of
@@ -81,6 +83,14 @@ enum CameraModelType {
 #define TRANSMITTANCE_THRESHOLD 1e-4f
 
 #define MAX_KERNEL_DENSITY_CUTOFF 0.0113
+
+// Floor for the antialiased compensation factor (sqrt(det_orig / det_blur)).
+// Prevents compensation from reaching zero for extremely small Gaussians.
+#define MIN_COMPENSATION 0.005f
+
+// Floor for (1 - alpha) when computing 1/(1-alpha) in backward rasterization.
+// Prevents gradient explosion when alpha approaches 1.0.
+#define MIN_ONE_MINUS_ALPHA 1e-6f
 
 #ifdef __CUDACC__
 #   define GSPLAT_NOINLINE __noinline__
