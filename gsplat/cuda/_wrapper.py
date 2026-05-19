@@ -508,7 +508,7 @@ def fully_fused_projection(
         an indicator, in which zero radii means the corresponding elements are invalid in
         the output tensors and will be ignored in the next rasterization process. If `packed=True`,
         the output tensors will be packed into a flattened tensor, in which all elements are valid.
-        In this case, a ``batch_ids` tensor and `camera_ids` tensor will be returned to indicate the
+        In this case, a `batch_ids` tensor and `camera_ids` tensor will be returned to indicate the
         batch, camera and gaussian indices of the packed flattened tensor, which is essentially following the
         COO sparse tensor format.
 
@@ -901,6 +901,7 @@ def rasterize_to_pixels(
         9,
         16,
         17,
+        24,
         32,
         33,
         64,
@@ -1166,6 +1167,7 @@ def rasterize_to_pixels_eval3d_extra(
         9,
         16,
         17,
+        24,
         32,
         33,
         64,
